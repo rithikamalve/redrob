@@ -21,7 +21,7 @@ team_members:
 # ============================================================================
 github_repo: "https://github.com/rithikamalve/redrob"
 
-sandbox_link: "TODO — deploy app.py to HuggingFace Spaces, see README.md 'Sandbox demo' section for steps, then put the Space URL here"
+sandbox_link: "https://huggingface.co/spaces/rithikamalve/redrob"
 
 reproduce_command: "python rank.py --candidates ./candidates.jsonl --out ./submission.csv"
 # rank.py reads features/features.parquet (committed to the repo, ~4MB) and
