@@ -94,9 +94,10 @@
                     │  Q5: LLM / NLP / rerank  │
                     │                          │
                     │  Candidate text =        │
-                    │  headline + summary +    │
-                    │  last 3 role descs       │
-                    │  (most recent first)     │
+                    │  headline+summary+skills │
+                    │  + ALL roles, most-recent│
+                    │  -first (no cap; trunc.  │
+                    │  drops oldest, not newest│
                     │                          │
                     │  Score = 0.5×max_sim     │
                     │        + 0.5×mean_sim    │
@@ -751,7 +752,7 @@ def skill_assessment_bonus(skill_assessment_scores):
     if not relevant:
         return 0.0
     avg = sum(relevant) / len(relevant)
-    return min(avg / 100 * 0.10, 0.10)  # max 0.10 bonus; blended into skill_score in rank.py
+    return min(avg / 100 * 0.10, 0.10)  # max 0.10 bonus; added to jd_fit_score in rank.py
 
 
 EDUCATION_TIER_BONUS = {"tier_1": 0.05, "tier_2": 0.03, "tier_3": 0.01, "tier_4": 0.0, "unknown": 0.0}
@@ -968,7 +969,7 @@ The max-mean blend ensures that a candidate who deeply matches one requirement (
 
 ### 5.6 Cross-Encoder Reranking
 
-The bi-encoder above is a *retriever*: it embeds the JD and each candidate independently, so similarity is just a dot product. That is fast (100K candidates in ~10-12 min) but loses cross-text interaction — it can't tell that "built RAG pipelines for a recruiting platform" is a much stronger match for this exact JD than "used embeddings in a class project," because the two texts never attend to each other.
+The bi-encoder above is a *retriever*: it embeds the JD and each candidate independently, so similarity is just a dot product. That is fast relative to a cross-encoder (no full-attention comparison per pair) — though still ~44 min for 100K candidates measured end-to-end (see §10) — but it loses cross-text interaction — it can't tell that "built RAG pipelines for a recruiting platform" is a much stronger match for this exact JD than "used embeddings in a class project," because the two texts never attend to each other.
 
 A cross-encoder fixes this by feeding `(JD_text, candidate_text)` into the model *together*, so every token can attend to every other token. This is far more precise but much slower — it cannot be batched into a single matrix multiply against 100K candidates, so we apply it only to a shortlist.
 
@@ -1023,29 +1024,35 @@ The 500-candidate cutoff and 0.65/0.35 blend weight are deliberately conservativ
 
 All extracted features are saved per candidate in a single parquet file (~200MB). This is what `rank.py` loads.
 
+This is the actual column list precompute.py writes (matches the `row` dict
+built in `_process_candidate()` plus the two columns filled in after batch
+embedding/reranking):
+
 ```
-features.parquet columns:
+features.parquet columns (47 total):
   candidate_id
-  honeypot, honeypot_soft, hard_out
-  consulting_multiplier, stuffer_multiplier, coding_gap_multiplier
-  ml_months, product_fraction, title_hop, coding_gap
-  recent_ml, founding_team_exp, avg_desc_words
-  skills_retrieval, skills_vectordb, skills_embeddings
-  skills_eval, skills_python, skills_llm_ops
-  assessment_bonus, education_bonus           # new: platform-verified and education tier
+  honeypot, honeypot_soft, hp_signal_count
+  location_class, location_score, consulting_frac, consulting_multiplier,
+  domain_mismatch, hard_out, salary_score, workmode_score
+  yoe, exp_curve_score, ml_months, product_fraction, title_hop,
+  coding_gap, coding_gap_multiplier, founding_team_exp, recent_ml, avg_desc_words
+  skill_retrieval, skill_vector_db, skill_embeddings, skill_eval_ranking,
+  skill_python_mlops, skill_llm_ops, weighted_skill_score
+  stuffer_flag, stuffer_multiplier, skill_assessment_bonus, education_tier_bonus
   tech_keyword_score
-  recency_score, response_score, response_time_score
-  github_score, notice_score, offer_score
-  open_bonus, interview_score, saved_score    # saved_score from saved_by_recruiters_30d
-  location_score, salary_score, workmode_score
+  recency_score, response_score, response_time_score, github_score,
+  notice_score, saved_score, interview_score, offer_score, open_bonus
+  current_title, current_company, recruiter_response_rate
   semantic_score
   rerank_score                                # 0.0 unless in top-500 cross-encoder pool
-  # raw fields required for reasoning strings:
-  years_of_experience, current_title, location
-  days_inactive, notice_period_days
-  search_appearance_30d, recruiter_response_rate
-  github_activity_score
 ```
+
+Note that `weighted_skill_score` (the 6 skill groups combined with `SKILL_WEIGHTS`)
+is computed *once*, here in precompute.py — `rank.py` reads it directly rather
+than recombining the 6 raw `skill_*` group columns itself. The raw group
+columns are kept in the parquet only so `scorer/reasoning.py` can name the
+specific matched groups (e.g. "strong retrieval & vector-DB skills") instead
+of just reporting the aggregate score.
 
 ---
 
@@ -1065,14 +1072,10 @@ df = df[~df["honeypot"]]
 # (~35K–50K candidates remain)
 
 # --- JD Fit Score ---
-skill_score = (
-    df["skills_retrieval"]   * 0.25 +
-    df["skills_vectordb"]    * 0.20 +
-    df["skills_embeddings"]  * 0.20 +
-    df["skills_eval"]        * 0.20 +
-    df["skills_python"]      * 0.10 +
-    df["skills_llm_ops"]     * 0.05
-)
+# weighted_skill_score (the 6 skill groups combined with SKILL_WEIGHTS) was
+# already computed once in precompute.py — rank.py reads it directly rather
+# than recombining the 6 raw skill_* columns itself.
+
 # Blend bi-encoder with cross-encoder for the top-500 reranked pool;
 # everyone else (rerank_score == 0.0, never cross-encoded) keeps the bi-encoder score alone.
 blended_semantic = np.where(
@@ -1081,11 +1084,12 @@ blended_semantic = np.where(
     df["semantic_score"],
 )
 
-jd_fit = (
+jd_base = (
     0.55 * blended_semantic +
-    0.25 * (skill_score + df["assessment_bonus"]) +  # platform-verified scores boost skill signal
+    0.25 * df["weighted_skill_score"] +
     0.20 * df["tech_keyword_score"]
-).clip(0, 1)
+)
+jd_fit = (jd_base + df["skill_assessment_bonus"]).clip(0, 1)
 
 # --- Career Score ---
 ml_component = np.minimum(df["ml_months"] / 48, 1.0)   # 4 yrs ML = full
@@ -1100,7 +1104,7 @@ def experience_curve(yoe):
     if yoe <= 12: return 0.80
     return 0.70
 
-df["exp_curve"] = df["years_of_experience"].apply(experience_curve)
+df["exp_curve_score"] = df["yoe"].apply(experience_curve)
 
 trajectory = np.where(
     ~df["title_hop"] & ~df["coding_gap"], 1.00,
@@ -1109,13 +1113,13 @@ trajectory = np.where(
 )
 startup_bonus = df["founding_team_exp"].astype(float) * 0.05
 recent_ml_bonus = df["recent_ml"].astype(float) * 0.05  # was computed but unused — now applied
-edu_bonus = df["education_bonus"]  # 0.0–0.05 from institution tier
+edu_bonus = df["education_tier_bonus"]  # 0.0–0.05 from institution tier
 
 career_score = (
     0.35 * ml_component +
     0.30 * product_component +
     0.25 * trajectory +
-    0.10 * df["exp_curve"] +
+    0.10 * df["exp_curve_score"] +
     startup_bonus +
     recent_ml_bonus +
     edu_bonus
@@ -1207,70 +1211,81 @@ The reasoning is evaluated at Stage 4 against six checks:
 5. Variation between candidates
 6. Rank consistency (tone matches rank position)
 
+This is the actual `scorer/reasoning.py` logic (simplified slightly for
+readability — see the real file for the exact truncation/length-cap details):
+
 ```python
+_SKILL_GROUP_LABELS = [
+    ("skill_retrieval",    "retrieval"),
+    ("skill_vector_db",    "vector-DB"),
+    ("skill_embeddings",   "embeddings"),
+    ("skill_eval_ranking", "eval/ranking"),
+    ("skill_python_mlops", "Python/MLOps"),
+    ("skill_llm_ops",      "LLM ops"),
+]
+
+def _named_skill_groups(row, top_n=2, min_score=0.35):
+    scored = [(label, row.get(col, 0)) for col, label in _SKILL_GROUP_LABELS]
+    scored = [(l, s) for l, s in scored if s >= min_score]
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [label for label, _ in scored[:top_n]]
+
 def generate_reasoning(row, rank):
-    c = row  # feature row with raw profile fields
+    title = row.get("current_title", "")
+    company = row.get("current_company", "")
+    yoe = row.get("yoe", 0)
+    loc_label = {"tier1_india": "metro India", "tier2_india": "tier-2 India",
+                 "remote_india": "remote India", "intl_open": "intl/open"}.get(
+                     row.get("location_class", ""), row.get("location_class", ""))
 
-    yoe = round(c["years_of_experience"], 1)
-    title = c["current_title"]
-    location = c["location"]
+    # fit_score prefers the cross-encoder rerank_score when this candidate
+    # was in the top-500 reranked pool; falls back to the bi-encoder score.
+    rerank = row.get("rerank_score", 0)
+    fit_score = rerank if rerank > 0 else row.get("semantic_score", 0)
+    skill_groups = _named_skill_groups(row)
 
-    # Build strength sentence
+    # --- Strengths, each tied to a specific JD requirement, not generic praise ---
     strengths = []
-    if c["ml_months"] >= 36:
-        strengths.append(f"{c['ml_months']//12}+ yrs in applied ML roles")
-    if c["skills_retrieval"] > 0.5 or c["skills_vectordb"] > 0.5:
-        strengths.append("strong retrieval/vector-search background")
-    if c["skills_eval"] > 0.5:
-        strengths.append("ranking evaluation experience")
-    if c["founding_team_exp"]:
-        strengths.append("prior startup/founding-team exposure")
-    if c["product_fraction"] > 0.8:
-        strengths.append("product-company career")
+    if skill_groups:
+        strengths.append(f"strong {' & '.join(skill_groups)} skills")
+    if row.get("ml_months", 0) >= 48:
+        strengths.append(f"{row['ml_months']}mo hands-on ML/AI experience")
+    if fit_score >= 0.55:
+        strengths.append(f"strong JD fit ({fit_score:.2f})")
+    if row.get("tech_keyword_score", 0) >= 0.6:
+        strengths.append("deep IR/ranking technical vocabulary (FAISS/NDCG-class terms)")
+    if row.get("founding_team_exp"):
+        strengths.append("startup/founding-team experience")
+    if row.get("recruiter_response_rate", 0) >= 0.70:
+        strengths.append(f"responsive to recruiters ({row['recruiter_response_rate']:.0%})")
 
-    strength_str = "; ".join(strengths[:2]) if strengths else "adjacent ML background"
-    sentence1 = f"{yoe}-yr {title} in {location} — {strength_str}."
-
-    # Build concern sentence (honest about gaps)
+    # --- Concerns, mapped directly to the JD's explicit "do NOT want" list ---
     concerns = []
-    days_inactive = c["days_inactive"]
-    if days_inactive > 180:
-        concerns.append(f"inactive on platform for {days_inactive // 30} months")
-    notice = c["notice_period_days"]
-    if notice > 60:
-        concerns.append(f"{notice}-day notice period")
-    if c["consulting_multiplier"] < 0.85:
-        concerns.append("primarily services-firm background")
-    if c["coding_gap"]:
-        concerns.append("recent roles appear management-focused")
-    if c["response_score"] < 0.2 and c["search_appearance_30d"] > 10:
-        concerns.append(f"low recruiter response rate ({c['recruiter_response_rate']:.0%})")
-
-    # Rank 76-100: be honest that they are lower-priority filler
+    if row.get("coding_gap"):
+        concerns.append("most recent title is management-only, JD wants hands-on code")
+    if row.get("title_hop"):
+        concerns.append("title-hopping pattern JD explicitly screens against")
+    if row.get("consulting_multiplier", 1.0) < 0.8:
+        frac = row.get("consulting_frac", 0)
+        concerns.append(f"{frac:.0%} consulting-firm career, JD prefers product company background")
     if rank >= 76 and not concerns:
-        concerns.append("included as best remaining fit below cutoff")
+        weakest = "JD fit" if fit_score < 0.45 else "overall signal strength"
+        concerns.append(f"included as lower-priority filler — {weakest} is the limiting factor here")
 
-    if concerns:
-        sentence2 = f"Concern: {'; '.join(concerns[:2])}."
-    else:
-        # Secondary strength instead of concern
-        secondaries = []
-        if c["github_score"] > 0.6:
-            secondaries.append(f"active GitHub (score: {c['github_activity_score']:.0f}/100)")
-        if c["notice_score"] > 0.8:
-            secondaries.append("immediate or short notice period")
-        if c["recency_score"] > 0.8:
-            secondaries.append("active on platform in last 30 days")
-        sentence2 = (f"Also: {'; '.join(secondaries[:2])}." if secondaries else "")
+    who = f"{yoe:.1f}yr {title}" + (f" at {company}" if company else "")
+    s1 = f"{who} | {loc_label}" + (" — " + "; ".join(strengths[:2]) if strengths else "") + "."
+    s2 = ("Concern: " + "; ".join(concerns[:2]) + "."
+          if concerns else
+          ("Also: " + "; ".join(strengths[2:4]) + "." if len(strengths) > 2 else ""))
 
-    reasoning = f"{sentence1} {sentence2}".strip()
-    return reasoning[:250]  # hard cap, well within spec
+    return (s1 + (" " + s2 if s2 else "")).strip()[:250]  # hard cap, well within spec
 ```
 
 Key constraints enforced:
-- Only references `current_title`, `location`, `years_of_experience` from `profile` — guaranteed present
-- Only references skill groups that scored above threshold — not arbitrary skill names
-- Only references `notice_period_days`, `days_inactive`, `recruiter_response_rate`, `github_activity_score` — all real fields
+- Only references `current_title`, `current_company`, `yoe`, `location_class` — all guaranteed present in the parquet
+- Names the actual matched skill groups (not arbitrary skill names) — `_named_skill_groups()` only returns groups that scored above `_SKILL_GROUP_MIN_SCORE` (0.35)
+- Concerns map directly to the JD's explicit "do NOT want" list (title-hoppers, consulting-only career, management-only recent title) rather than generic gap-flagging
+- Low-rank "filler" reasoning names the actual weakest signal instead of a bare "filler" label
 - Never references company names not in `career_history` or skills not in `skills[]`
 
 ### 6.5 Output Validation
@@ -1331,31 +1346,38 @@ The submission is scored by:
 
 This shapes two decisions:
 1. The tech keyword overlay is specifically designed to surface deep specialists who may be under-represented in semantic similarity scores. Specialists who know HNSW, ScaNN, cross-encoder architecture by name are exactly who would rank in a recruiter's top 10.
-2. The behavioral ghost multiplier ensures no candidate with a 180-day inactivity window appears in ranks 1-10, even with a perfect skill score. An inactive candidate is not hireable, and putting them in the top 10 is a ranking error regardless of their profile quality.
+2. `recency_score` uses exponential decay (`e^(-days_inactive / 90)`, so 180 days inactive → 0.135) rather than a hard cutoff — a candidate inactive for 180 days is heavily penalized on that one signal but isn't categorically excluded from the top 10, since `behavioral_score` is only 21% of the composite and an otherwise exceptional candidate could still rank highly. This is a deliberate tradeoff, not a guarantee: a hard "180 days inactive = forced low rank" rule was considered and rejected, since the dataset's activity timestamps are simulated and a single hard cutoff risks being an arbitrary, gameable threshold rather than a real signal of hireability.
 
 ---
 
 ## 9. Repository Structure
 
 ```
-redrob-ranker/
-├── precompute.py                  # Phase 1: feature extraction + embeddings
+redrob/
+├── precompute.py                  # Phase 1: feature extraction + embeddings + reranking
 ├── rank.py                        # Phase 2: scoring + output (≤5 min)
+├── ingest.py                      # Candidate normalisation (dates, salary, career sort)
 ├── scorer/
+│   ├── __init__.py
+│   ├── utils.py                   # Date parsing, consulting-firm match, interval merge
 │   ├── career.py                  # Career features: ML months, product fraction, etc.
 │   ├── skills.py                  # Skill taxonomy, synonym map, group scoring
 │   ├── behavioral.py              # Behavioral signal scoring with edge-case handling
-│   ├── semantic.py                # MiniLM embedding + JD query vectors
+│   ├── semantic.py                # MiniLM bi-encoder + bge-reranker-base cross-encoder
 │   ├── honeypot.py                # Internal consistency checks
 │   ├── logistics.py               # Location, salary, work mode
 │   └── reasoning.py               # Deterministic reasoning string generation
-├── config.py                      # All weights, firm lists, thresholds, city map, taxonomy
+├── config.py                      # All weights, firm lists, thresholds, city map, taxonomy, JD text
 ├── features/
-│   └── features.parquet           # Pre-computed (generated by precompute.py)
+│   └── features.parquet           # Pre-computed, committed (generated by precompute.py)
+├── candidate_schema.json          # Provided JSON Schema reference
+├── sample_candidates.json         # Provided sample data
+├── sample_submission.csv          # Provided format reference
 ├── validate_submission.py         # Provided by challenge (unmodified)
 ├── submission_metadata.yaml       # Filled in from template
 ├── requirements.txt
-└── README.md
+├── README.md                      # Setup + reproduction commands
+└── SOLUTION.md                    # This file — full architecture and design rationale
 ```
 
 **README commands:**
@@ -1417,13 +1439,13 @@ The ranking step comfortably fits within the 5-minute budget with ~95% margin. T
 | 4 | CAND_0000339 | Content Writer | 8 AI skills listed |
 | 5 | CAND_0001082 | HR Manager | 8 AI skills listed |
 
-**Our system (semantic + career + behavioral) — Expected Rank 1-5 profile:**
-| Rank | Expected Profile |
-|---|---|
-| 1 | ML/AI Engineer, 6-8 yrs, product company, career descriptions mention retrieval/ranking/embeddings, active on platform, India-based, notice ≤30 days |
-| 2 | Similar to rank 1 but slightly lower behavioral engagement or longer notice |
-| 3 | Strong retrieval background, possibly at a consulting firm with genuine product-embedded work |
-| 4 | Applied Scientist with recommendation/search background, minor behavioral concern |
-| 5 | Senior ML Engineer with evaluation framework experience but international location (willing to relocate) |
+**Our system (two-stage semantic retrieval + career/behavioral/logistics) — actual Rank 1-5, from a real run:**
+| Rank | Candidate | Score | Reasoning |
+|---|---|---|---|
+| 1 | CAND_0018499 | 0.8924 | 7.2yr Senior Machine Learning Engineer at Zomato \| metro India — strong vector-DB & eval/ranking skills; 86mo hands-on ML/AI experience. Also: strong JD fit (0.71); deep IR/ranking technical vocabulary (FAISS/NDCG-class terms). |
+| 2 | CAND_0081846 | 0.8804 | 6.7yr Lead AI Engineer at Razorpay \| tier-2 India — strong retrieval & vector-DB skills; 79mo hands-on ML/AI experience. Also: strong JD fit (0.69); deep IR/ranking technical vocabulary. |
+| 3 | CAND_0046525 | 0.8794 | 6.1yr Senior Machine Learning Engineer at Genpact AI \| metro India — strong embeddings & LLM ops skills; 73mo hands-on ML/AI experience. Also: strong JD fit (0.70); deep IR/ranking technical vocabulary. |
+| 4 | CAND_0077337 | 0.8763 | 7.0yr Staff Machine Learning Engineer at Paytm \| tier-2 India — strong retrieval & vector-DB skills; 82mo hands-on ML/AI experience. **Concern: title-hopping pattern JD explicitly screens against.** |
+| 5 | CAND_0086022 | 0.8732 | 5.3yr Senior Applied Scientist at Sarvam AI \| metro India — strong vector-DB & embeddings skills; 63mo hands-on ML/AI experience. Also: strong JD fit (0.68); deep IR/ranking technical vocabulary. |
 
-The contrast between these two lists is the core argument of the system: surface-level skill lists predict nothing about genuine role fit. Career history, semantic understanding of role descriptions, and platform behavior together predict hireability.
+The contrast between these two lists is the core argument of the system: surface-level skill lists predict nothing about genuine role fit. Career history, semantic understanding of role descriptions, and platform behavior together predict hireability — and the system catches its own caveats: rank 4 (Paytm) is a strong candidate on every other dimension but still gets flagged for the exact title-hopping pattern the JD explicitly screens against, rather than being silently rewarded for an otherwise-strong profile.
