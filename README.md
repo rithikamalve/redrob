@@ -1,3 +1,14 @@
+---
+title: Redrob Candidate Ranker
+emoji: 🎯
+colorFrom: blue
+colorTo: purple
+sdk: gradio
+sdk_version: "6.18.0"
+app_file: app.py
+pinned: false
+---
+
 # Redrob Hackathon — Intelligent Candidate Discovery & Ranking
 
 Two-phase candidate ranking system: an offline feature/embedding pipeline
