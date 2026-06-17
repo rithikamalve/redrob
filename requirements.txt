@@ -1,0 +1,16 @@
+# Python 3.13 compatible.
+#
+# Install torch FIRST (CPU-only build for Python 3.13), then everything else:
+#
+#   Step 1:
+#     venv\Scripts\pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+#   Step 2:
+#     venv\Scripts\pip install -r requirements.txt
+
+sentence-transformers>=3.0.0
+pandas>=2.2.0
+numpy>=1.26.0
+pyarrow>=14.0.0
+python-dateutil>=2.9.0
+langdetect>=1.0.9

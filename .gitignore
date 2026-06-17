@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# PyTorch / sentence-transformers model cache
+*.pt
+*.bin
+*.safetensors
+models/
+.cache/
+
+# HuggingFace cache
+~/.cache/huggingface/
+
+# Raw dataset (organizer-provided, ~465MB uncompressed — too large for git,
+# exceeds GitHub's 100MB single-file limit; reproduce_command expects it
+# dropped into the repo root before running precompute.py / rank.py)
+candidates.jsonl
+candidates.jsonl.gz
+
+# Data / output files (keep samples and schema, ignore generated outputs)
+output/
+results/
+*.feather
+*.arrow
+*.parquet
+!features/features.parquet
+
+# Submission files (generated — keep sample_submission.csv as reference)
+submissions/
+*_submission.csv
+!sample_submission.csv
+
+# Office / docs
+*.docx
+*.xlsx
+*.pptx
+*.pdf
+*_template.*
+*template*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Logs
+*.log
+logs/
