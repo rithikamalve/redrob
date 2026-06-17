@@ -73,6 +73,27 @@ timed ranking step never touches `candidates.jsonl` itself.
 └── models/                      # downloaded model weights (gitignored — precompute.py fetches them)
 ```
 
+## Sandbox demo (spec Section 10.5)
+
+`app.py` is a Gradio app that runs the **real** `precompute.py` + `rank.py`
+end-to-end on a small sample (no reimplementation — it subprocess-calls the
+literal scripts in this repo). `demo_sample_candidates.jsonl` (250 real
+candidates) is the bundled default input — large enough that ≥100 survive
+the hard-gate filter, since `rank.py` requires `TOP_N=100` eligible
+candidates to produce output.
+
+Run it locally:
+```bash
+pip install gradio
+python app.py
+```
+
+To deploy to HuggingFace Spaces:
+1. Create a new Space at huggingface.co/new-space — SDK: **Gradio**, hardware: CPU basic (free tier).
+2. Push this repo's contents to the Space's git remote (or link the Space to this GitHub repo via Settings → Repository).
+3. Spaces auto-installs from `requirements.txt` and runs `app.py`. First run downloads the bi-encoder (~90MB) and reranker (~280MB) models, then takes ~1-2 minutes per pipeline run on the 250-candidate sample.
+4. Put the resulting Space URL in `submission_metadata.yaml` → `sandbox_link`.
+
 ## Compute environment this was developed and tested on
 
 See `submission_metadata.yaml` for the exact declared environment.

@@ -1,16 +1,21 @@
-# Python 3.13 compatible.
-#
-# Install torch FIRST (CPU-only build for Python 3.13), then everything else:
+# Python 3.13 compatible. On Python 3.13 specifically, install torch FIRST
+# (CPU-only build, since torch's default PyPI wheel doesn't yet support 3.13):
 #
 #   Step 1:
 #     venv\Scripts\pip install torch --index-url https://download.pytorch.org/whl/cpu
 #
 #   Step 2:
 #     venv\Scripts\pip install -r requirements.txt
+#
+# On other Python versions (e.g. HuggingFace Spaces, typically 3.10/3.11),
+# `pip install -r requirements.txt` alone is sufficient — torch below resolves
+# normally from PyPI.
 
+torch>=2.2.0
 sentence-transformers>=3.0.0
 pandas>=2.2.0
 numpy>=1.26.0
 pyarrow>=14.0.0
 python-dateutil>=2.9.0
 langdetect>=1.0.9
+gradio>=4.0.0   # only needed for app.py (HuggingFace Spaces sandbox demo)
