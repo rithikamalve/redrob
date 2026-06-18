@@ -80,18 +80,40 @@
                                  │
                                  ▼
                     ┌──────────────────────────┐
+                    │  JD PARSER (Groq LLM)    │
+                    │                          │
+                    │  Parses real JD once →   │
+                    │  must-haves, reject list,│
+                    │  nice-to-haves           │
+                    │                          │
+                    │  Builds: 5 JD_QUERIES +  │
+                    │  RERANK_JD_TEXT (~300tok,│
+                    │  hard word-cap enforced) │
+                    │                          │
+                    │  No GROQ_API_KEY, or call│
+                    │  fails → falls back to   │
+                    │  hand-written defaults   │
+                    │  in config.py (never     │
+                    │  hard-fails the run)     │
+                    │                          │
+                    │  Cached to disk so reruns│
+                    │  don't re-call the API   │
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                    ┌──────────────────────────┐
                     │  SEMANTIC EMBEDDER       │
                     │                          │
                     │  Model: MiniLM-L6-v2     │
                     │  Dim: 384                │
                     │  Batch: 512              │
                     │                          │
-                    │  5 JD Query Vectors:     │
-                    │  Q1: retrieval/vector DB │
-                    │  Q2: eval frameworks     │
-                    │  Q3: prod ML / Python    │
-                    │  Q4: startup / founding  │
-                    │  Q5: LLM / NLP / rerank  │
+                    │  5 JD Query Vectors —    │
+                    │  from JD PARSER above    │
+                    │  (must-haves, ideal      │
+                    │  profile, nice-to-haves; │
+                    │  hand-written fallback   │
+                    │  has same 5-topic shape) │
                     │                          │
                     │  Candidate text =        │
                     │  headline+summary+skills │
@@ -187,7 +209,14 @@
   │                    × stuffer_mult                    │
   │                    × coding_gap_mult                 │
   │                    × honeypot_soft_mult              │
+  │                    × diversity_mult                  │
   │                    .clip(0, 1)                       │
+  │                                                     │
+  │  diversity_mult: within any (company, title)         │
+  │  cluster, only top-2 by jd_fit_score keep 1.0x;       │
+  │  rest get 0.8x — keeps synthetic filler clusters      │
+  │  (e.g. 485 "Pied Piper / Accountant" candidates)       │
+  │  from crowding out genuine diversity                  │
   └────────────────────────┬────────────────────────────┘
                            │
                            ▼
@@ -260,14 +289,16 @@
 | **Config** | `config.py` (plain Python) | — | No YAML/TOML overhead; all thresholds, weights, firm lists in one importable module |
 | **Validation** | `validate_submission.py` | provided | Run before every submission; catches format errors before upload |
 | **Sandbox** | HuggingFace Spaces (Gradio) | — | Free tier, CPU-only, handles file upload, runs rank.py end-to-end on sample |
+| **JD parser (LLM)** | Groq (`llama-3.3-70b-versatile`) via `httpx`, in `scorer/jd_parser.py` | — | One call, once, on a ~600-word JD — not per-candidate. Runs only in `precompute.py` (network-allowed, no time limit), never in `rank.py`. Falls back to hand-written `config.py` defaults if `GROQ_API_KEY` is unset or the call fails — the pipeline never hard-depends on it |
 
 ### Why NOT these alternatives
 
 | Skipped Tool | Reason |
 |---|---|
 | `scikit-learn` TF-IDF / BM25 | This is exactly what the sample submission does — keyword frequency matching rewards keyword stuffers |
-| OpenAI / Anthropic API | Violates compute constraints (no network during ranking) |
-| Local LLM (Llama, Mistral) | 100K × LLM inference on CPU = hours, not minutes |
+| OpenAI / Anthropic / Groq API **during ranking** | Violates compute constraints (no network during ranking). We do call Groq, but only once in `precompute.py` to parse the JD — never per-candidate, never in `rank.py` |
+| LLM API call **per candidate** (any provider, any phase) | 100K calls would not fit any time budget and is explicitly the failure mode the spec's compute constraints are designed to filter out (see Section 3: "running an LLM call for each of 100,000 candidates will not fit the 5-minute CPU budget, even if the model runs locally") |
+| Local LLM (Llama, Mistral) for per-candidate scoring | 100K × LLM inference on CPU = hours, not minutes |
 | `faiss` for ANN search | Unnecessary — we're comparing 100K vectors against 5 query vectors, not doing k-NN search; plain matrix multiply is faster and simpler |
 | `spaCy` / `nltk` | Overhead not justified; regex + Python string ops handle keyword extraction adequately |
 | `polars` instead of `pandas` | Marginal speed gain at this scale; pandas is more universally understood for Stage 4/5 reviewers |
@@ -868,11 +899,93 @@ def salary_fit(signals):
     return min((overlap_max - overlap_min) / (JD_SALARY_MAX - JD_SALARY_MIN), 1.0)
 ```
 
-### 5.5 Semantic Embeddings
+### 5.5 LLM-Based JD Parsing
+
+Runs once per `precompute.py` invocation, on a single ~600-word JD — not per
+candidate, and never in `rank.py`. This is the dynamic "Deep Job Understanding"
+piece the hand-written `JD_QUERIES`/`RERANK_JD_TEXT` couldn't provide on their
+own: instead of a human pre-deciding the JD's structure, an LLM (Groq,
+`llama-3.3-70b-versatile`) extracts it directly from `config.FULL_JD_TEXT_RAW`
+(the real JD, condensed only by trimming pure narrative/cultural framing).
+
+**Why this doesn't violate the compute constraints:** Section 3 bans hosted
+LLM calls *during the ranking step* specifically because per-candidate LLM
+calls don't scale ("running an LLM call for each of 100,000 candidates will
+not fit the 5-minute CPU budget"). This is the opposite case — one call, on
+one document, in the untimed precompute phase. `rank.py` never imports
+`scorer/jd_parser.py` or makes any network call.
+
+**Extraction schema** (`scorer/jd_parser.py::_EXTRACTION_SCHEMA_PROMPT`):
+
+```json
+{
+  "job_title": "exact job title + company, e.g. 'Senior AI Engineer, Redrob AI'",
+  "role_mandate": "1 sentence, ~20-25 words, on what the role actually does",
+  "must_have_requirements": ["exactly 4 items, each ~10-15 words, names specific tools/tech"],
+  "ideal_candidate_profile": "1 sentence, ~20-25 words",
+  "nice_to_have": ["exactly 4 items, each ~8-12 words"],
+  "hard_disqualifiers": ["exactly 4 items, each ~10-15 words"]
+}
+```
+
+This structure feeds the same shape of output the hand-written config
+constants already provided — 5 bi-encoder query strings (`_build_queries`)
+and one cross-encoder JD text (`_build_rerank_text`) — so nothing downstream
+(the bi-encoder, the cross-encoder, `rank.py`) needs to know or care whether
+the JD text came from the LLM or the fallback.
+
+**Three bugs found and fixed while building this, in order:**
+
+1. **Token-budget overflow (round 1).** The first prompt asked for "short"
+   items but didn't enforce it numerically. Groq wrote full explanatory
+   sentences ("Senior engineers who haven't written production code in the
+   last 18 months because they moved into architecture or tech-lead-only
+   roles" for a single disqualifier item) — 243 words, **480 tokens**, almost
+   exactly the same bug as the hand-written version's first draft (824
+   tokens), for the same reason: `max_length=512` is shared between the JD
+   text and the candidate's text in the cross-encoder pair.
+
+2. **Over-correction.** Fixed round 1 by capping every item at ≤8 words —
+   too aggressively. The result (41 words, 85 tokens) was well within budget
+   but the rerank scores **collapsed**: `min=0.5003 max=0.5237` across the
+   whole reranked pool — the cross-encoder couldn't meaningfully discriminate
+   between candidates anymore. Caught this by checking `rerank_score.describe()`
+   after a real run rather than just checking token count and assuming it
+   worked — a budget-compliant query is useless if it's too sparse to carry
+   any signal.
+
+3. **The actual fix: an explicit anchor matters more than length.** Direct
+   A/B test — same 15 candidates, same reranker, only the JD text varied —
+   isolated the cause: leading with the literal job title ("Senior AI
+   Engineer, Redrob AI.") before any paraphrased content took scores from
+   collapsed (`0.500-0.501`) to spread (`0.503-0.537`) on the *exact same*
+   paraphrased body text. Added `job_title` as its own schema field,
+   extracted from the JD verbatim rather than paraphrased, and prepended it
+   in `_build_rerank_text`. Final measured result on the full 100K-candidate,
+   500-candidate reranked pool: `min=0.545 max=0.730 mean=0.642` — comparable
+   to or better than the hand-written fallback's own measured range.
+   (Not fully explained — best hypothesis is `bge-reranker-base` needs a
+   concrete, literal anchor for "what is this text" before it can usefully
+   score an abstract paraphrase against a resume — but reproduced 3 times
+   directly, so treated as a hard requirement on the text's structure.)
+
+The length-budget fix from round 1 is still in place as a safety net
+(`_RERANK_TEXT_MAX_WORDS = 170`, ~landing around 300 tokens) — items just
+target ~10-15 words now instead of ≤8, with worked good/bad examples in the
+prompt itself.
+
+**Reliability:** the parsed result is cached to `features/jd_parsed_cache.json`
+so repeated `precompute.py` runs don't re-call the API. If `GROQ_API_KEY`
+isn't set, the call fails, or the response doesn't match the expected JSON
+schema, `get_jd_queries_and_rerank_text()` logs a warning and returns the
+hand-written `config.JD_QUERIES`/`config.RERANK_JD_TEXT` instead — the
+pipeline has no hard dependency on this API being available or correct.
+
+### 5.6 Semantic Embeddings
 
 **Model:** `all-MiniLM-L6-v2` — 22MB, CPU-optimized, 512 token limit.
 
-**Why this model:** It is the standard CPU-friendly choice for semantic similarity at scale. At 100K candidates it takes ~44 minutes on CPU (pre-compute phase, no time limit) — slower than the 22MB model size would suggest, since candidate texts (headline + summary + skills + multiple role descriptions) run up to the 512-token limit. The embedding dimension is 384, compact enough to keep the full 100K matrix in memory. We initially tried `bge-large-en-v1.5` (1024-dim) and `bge-base-en-v1.5` (768-dim) as the bi-encoder for higher retrieval quality, but both were too slow on CPU for the full 100K pass; MiniLM is the fast first-stage retriever, and quality is recovered by cross-encoding the top 500 (see §5.6).
+**Why this model:** It is the standard CPU-friendly choice for semantic similarity at scale. At 100K candidates it takes ~44 minutes on CPU (pre-compute phase, no time limit) — slower than the 22MB model size would suggest, since candidate texts (headline + summary + skills + multiple role descriptions) run up to the 512-token limit. The embedding dimension is 384, compact enough to keep the full 100K matrix in memory. We initially tried `bge-large-en-v1.5` (1024-dim) and `bge-base-en-v1.5` (768-dim) as the bi-encoder for higher retrieval quality, but both were too slow on CPU for the full 100K pass; MiniLM is the fast first-stage retriever, and quality is recovered by cross-encoding the top 500 (see §5.7).
 
 **JD decomposed into 5 query vectors:**
 
@@ -967,7 +1080,7 @@ semantic_scores = 0.5 * similarities.max(axis=1) + 0.5 * similarities.mean(axis=
 
 The max-mean blend ensures that a candidate who deeply matches one requirement (e.g., pure retrieval expert) scores nearly as well as a generalist who matches all five moderately.
 
-### 5.6 Cross-Encoder Reranking
+### 5.7 Cross-Encoder Reranking
 
 The bi-encoder above is a *retriever*: it embeds the JD and each candidate independently, so similarity is just a dot product. That is fast relative to a cross-encoder (no full-attention comparison per pair) — though still ~44 min for 100K candidates measured end-to-end (see §10) — but it loses cross-text interaction — it can't tell that "built RAG pipelines for a recruiting platform" is a much stronger match for this exact JD than "used embeddings in a class project," because the two texts never attend to each other.
 
@@ -1020,7 +1133,7 @@ blended_semantic = np.where(
 
 The 500-candidate cutoff and 0.65/0.35 blend weight are deliberately conservative: the cross-encoder only ever *refines* the ranking within the pool the bi-encoder already surfaced as plausible — it cannot promote a candidate the bi-encoder ranked far outside the top 500, which keeps Stage 2 from being able to introduce wild outliers from a single model's quirks.
 
-### 5.7 Save to Parquet
+### 5.8 Save to Parquet
 
 All extracted features are saved per candidate in a single parquet file (~200MB). This is what `rank.py` loads.
 
@@ -1153,6 +1266,14 @@ base_score = (
     0.05 * logistics_score
 )
 
+# --- Diversity safeguard (see 6.1.1) ---
+company = df["current_company"].fillna("")
+title   = df["current_title"].fillna("")
+has_group = (company != "") & (title != "")
+group_key = company + "||" + title
+rank_within_group = df.groupby(group_key)["jd_fit_score"].rank(method="first", ascending=False)
+diversity_mult = np.where(has_group & (rank_within_group > 2), 0.80, 1.0)
+
 # --- Apply multipliers ---
 composite = (
     base_score
@@ -1160,8 +1281,38 @@ composite = (
     * df["stuffer_multiplier"]
     * df["coding_gap_multiplier"]
     * np.where(df["honeypot_soft"], 0.65, 1.0)
+    * diversity_mult
 ).clip(0, 1)
 ```
+
+#### 6.1.1 Diversity Safeguard
+
+The dataset contains large clusters of clearly-synthetic filler candidates —
+e.g. 485 candidates with `current_company="Pied Piper"` and
+`current_title="Accountant"`, 478 with `"Wayne Enterprises"` /
+`"Sales Executive"`, recycled fictional company names (Pied Piper, Wayne
+Enterprises, Acme Corp, Globex Inc, Dunder Mifflin) paired with completely
+irrelevant non-ML titles. These were already going to rank low on
+`jd_fit_score` regardless, but as a defensive backstop against any
+(`current_company`, `current_title`) cluster — synthetic or genuine —
+crowding out diversity in the top 100, only the top `DIVERSITY_GROUP_FREE_COUNT`
+(2) candidates per cluster, ranked by `jd_fit_score`, keep full composite
+weight; additional members of the same cluster get a `DIVERSITY_PENALTY_MULT`
+(0.80) multiplier. Not a hard exclusion — a candidate ranked 3rd in their
+cluster can still place if their score is otherwise strong enough to survive
+a 20% haircut.
+
+Based on `jd_fit_score` rather than the final `composite`, to avoid a
+circular dependency (composite is computed *from* this multiplier).
+Candidates with missing `current_company`/`current_title` are exempt (no
+meaningful grouping possible) rather than incorrectly clustered together.
+Verified on the real 100K dataset before deploying: of 75,502 eligible
+candidates, 744 (company, title) clusters exceeded the free-count threshold,
+affecting 73,688 candidates total — almost entirely the synthetic filler
+clusters described above, confirmed by checking that the top-5 ranked
+candidates were unchanged before/after adding this safeguard (the penalty
+only pushes already-low-relevance filler further down, it doesn't disturb
+genuinely strong matches).
 
 ### 6.2 Sort and Tiebreak
 
@@ -1399,6 +1550,7 @@ python validate_submission.py team_xxx.csv
 | Step | Phase | Measured Time |
 |---|---|---|
 | Load + parse 100K JSONL + rule-based feature extraction (honeypot, gates, skills, career, behavioral) | precompute | ~94s |
+| LLM-based JD parsing (Groq, 1 call) — cached after first run, ~0s on reruns | precompute | ~1-2s (first run only) |
 | Bi-encoder embedding (100K candidates, MiniLM, batch 512) | precompute | ~44 min |
 | Cross-encoder reranking (top 500, bge-reranker-base, batch 32) | precompute | ~3–5 min |
 | Save parquet | precompute | ~1s |
@@ -1416,6 +1568,12 @@ The ranking step comfortably fits within the 5-minute budget with ~95% margin. T
 ---
 
 ## 11. What We're Not Doing (and Why)
+
+Note: we *do* use a hosted LLM (Groq) once, in `precompute.py`, to parse the
+JD into structured requirements (§5.5) — that's compliant since it's one
+call on one document, not per-candidate, and never touches `rank.py`. The
+items below are specifically about *per-candidate* LLM usage, which would
+violate the compute constraints regardless of which phase it ran in.
 
 | Approach | Why We Skipped It |
 |---|---|
@@ -1439,13 +1597,13 @@ The ranking step comfortably fits within the 5-minute budget with ~95% margin. T
 | 4 | CAND_0000339 | Content Writer | 8 AI skills listed |
 | 5 | CAND_0001082 | HR Manager | 8 AI skills listed |
 
-**Our system (two-stage semantic retrieval + career/behavioral/logistics) — actual Rank 1-5, from a real run:**
+**Our system (two-stage semantic retrieval, LLM-parsed JD, career/behavioral/logistics) — actual Rank 1-5, from the final run:**
 | Rank | Candidate | Score | Reasoning |
 |---|---|---|---|
-| 1 | CAND_0018499 | 0.8924 | 7.2yr Senior Machine Learning Engineer at Zomato \| metro India — strong vector-DB & eval/ranking skills; 86mo hands-on ML/AI experience. Also: strong JD fit (0.71); deep IR/ranking technical vocabulary (FAISS/NDCG-class terms). |
-| 2 | CAND_0081846 | 0.8804 | 6.7yr Lead AI Engineer at Razorpay \| tier-2 India — strong retrieval & vector-DB skills; 79mo hands-on ML/AI experience. Also: strong JD fit (0.69); deep IR/ranking technical vocabulary. |
-| 3 | CAND_0046525 | 0.8794 | 6.1yr Senior Machine Learning Engineer at Genpact AI \| metro India — strong embeddings & LLM ops skills; 73mo hands-on ML/AI experience. Also: strong JD fit (0.70); deep IR/ranking technical vocabulary. |
-| 4 | CAND_0077337 | 0.8763 | 7.0yr Staff Machine Learning Engineer at Paytm \| tier-2 India — strong retrieval & vector-DB skills; 82mo hands-on ML/AI experience. **Concern: title-hopping pattern JD explicitly screens against.** |
-| 5 | CAND_0086022 | 0.8732 | 5.3yr Senior Applied Scientist at Sarvam AI \| metro India — strong vector-DB & embeddings skills; 63mo hands-on ML/AI experience. Also: strong JD fit (0.68); deep IR/ranking technical vocabulary. |
+| 1 | CAND_0018499 | 0.8937 | 7.2yr Senior Machine Learning Engineer at Zomato \| metro India — strong vector-DB & eval/ranking skills; 86mo hands-on ML/AI experience. Also: strong JD fit (0.73); deep IR/ranking technical vocabulary (FAISS/NDCG-class terms). |
+| 2 | CAND_0081846 | 0.8865 | 6.7yr Lead AI Engineer at Razorpay \| tier-2 India — strong retrieval & vector-DB skills; 79mo hands-on ML/AI experience. Also: strong JD fit (0.73); deep IR/ranking technical vocabulary. |
+| 3 | CAND_0046525 | 0.8838 | 6.1yr Senior Machine Learning Engineer at Genpact AI \| metro India — strong embeddings & LLM ops skills; 73mo hands-on ML/AI experience. Also: strong JD fit (0.72); deep IR/ranking technical vocabulary. |
+| 4 | CAND_0077337 | 0.8811 | 7.0yr Staff Machine Learning Engineer at Paytm \| tier-2 India — strong retrieval & vector-DB skills; 82mo hands-on ML/AI experience. **Concern: title-hopping pattern JD explicitly screens against.** |
+| 5 | CAND_0086022 | 0.8790 | 5.3yr Senior Applied Scientist at Sarvam AI \| metro India — strong vector-DB & embeddings skills; 63mo hands-on ML/AI experience. Also: strong JD fit (0.72); deep IR/ranking technical vocabulary. |
 
 The contrast between these two lists is the core argument of the system: surface-level skill lists predict nothing about genuine role fit. Career history, semantic understanding of role descriptions, and platform behavior together predict hireability — and the system catches its own caveats: rank 4 (Paytm) is a strong candidate on every other dimension but still gets flagged for the exact title-hopping pattern the JD explicitly screens against, rather than being silently rewarded for an otherwise-strong profile.

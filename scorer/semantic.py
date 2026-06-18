@@ -106,15 +106,21 @@ def load_model() -> "SentenceTransformer":
     return SentenceTransformer(EMBEDDING_MODEL, cache_folder=MODEL_CACHE_DIR)
 
 
-def embed_queries(model: "SentenceTransformer") -> "np.ndarray":
+def embed_queries(model: "SentenceTransformer", queries: Optional[List[str]] = None) -> "np.ndarray":
     """
-    Embed the 5 JD queries with the BGE instruction prefix (retrieval mode).
+    Embed the JD queries with the BGE instruction prefix (retrieval mode).
 
-    Returns (5, D) L2-normalised float32.
+    Parameters
+    ----------
+    queries : override list of query strings (e.g. from LLM-based JD parsing
+              in scorer/jd_parser.py). Defaults to config.JD_QUERIES.
+
+    Returns (N, D) L2-normalised float32.
     """
     import numpy as np
+    queries = queries if queries is not None else JD_QUERIES
     queries_with_instruction = [
-        BGE_QUERY_INSTRUCTION + q for q in JD_QUERIES
+        BGE_QUERY_INSTRUCTION + q for q in queries
     ]
     vecs = model.encode(
         queries_with_instruction,
@@ -193,6 +199,7 @@ def load_reranker() -> "CrossEncoder":
 def rerank_candidates(
     candidate_texts: List[str],
     reranker: "CrossEncoder",
+    jd_text: Optional[str] = None,
     batch_size: int = 32,
 ) -> "np.ndarray":
     """
@@ -205,6 +212,8 @@ def rerank_candidates(
     ----------
     candidate_texts : list of non-None candidate text strings
     reranker        : loaded CrossEncoder
+    jd_text         : override JD text (e.g. from LLM-based JD parsing in
+                      scorer/jd_parser.py). Defaults to config.RERANK_JD_TEXT.
     batch_size      : inference batch size (keep low for CPU)
 
     Returns
@@ -215,7 +224,8 @@ def rerank_candidates(
     if not candidate_texts:
         return np.array([], dtype=np.float32)
 
-    pairs = [(RERANK_JD_TEXT, text) for text in candidate_texts]
+    jd_text = jd_text if jd_text is not None else RERANK_JD_TEXT
+    pairs = [(jd_text, text) for text in candidate_texts]
     log.info("Cross-encoding %d candidates (batch=%d)...", len(pairs), batch_size)
 
     raw_scores = reranker.predict(pairs, batch_size=batch_size, show_progress_bar=True)

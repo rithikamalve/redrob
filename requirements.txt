@@ -18,4 +18,5 @@ numpy>=1.26.0
 pyarrow>=14.0.0
 python-dateutil>=2.9.0
 langdetect>=1.0.9
+httpx>=0.27.0   # used by scorer/jd_parser.py to call Groq (precompute.py only)
 gradio>=4.0.0   # only needed for app.py (HuggingFace Spaces sandbox demo)

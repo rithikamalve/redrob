@@ -36,6 +36,8 @@ from config import (
     BASE_WEIGHTS,
     BEHAVIORAL_WEIGHTS,
     CAREER_WEIGHTS,
+    DIVERSITY_GROUP_FREE_COUNT,
+    DIVERSITY_PENALTY_MULT,
     HONEYPOT_SOFT_MULT,
     JD_FIT_WEIGHTS,
     LOGISTICS_WEIGHTS,
@@ -144,13 +146,30 @@ def _compute_subscores(df: pd.DataFrame) -> pd.DataFrame:
         df["salary_score"]   * LOGISTICS_WEIGHTS["salary"]
     )
 
+    # Diversity safeguard — within any (current_company, current_title) cluster,
+    # only the top DIVERSITY_GROUP_FREE_COUNT by jd_fit_score keep full weight;
+    # extras get a modest penalty. Based on jd_fit_score (already computed
+    # above) rather than the final composite, to avoid a circular dependency
+    # (composite = base * _total_mult, and this multiplier feeds _total_mult).
+    company = df["current_company"].fillna("")
+    title   = df["current_title"].fillna("")
+    has_group = (company != "") & (title != "")
+    group_key = company + "||" + title
+    rank_within_group = df.groupby(group_key)["jd_fit_score"].rank(method="first", ascending=False)
+    diversity_mult = np.where(
+        has_group.values & (rank_within_group.values > DIVERSITY_GROUP_FREE_COUNT),
+        DIVERSITY_PENALTY_MULT,
+        1.0,
+    )
+
     # Combined multiplier (product of all penalty terms)
     hp_soft_mult = np.where(df["honeypot_soft"].values, HONEYPOT_SOFT_MULT, 1.0)
     df["_total_mult"] = (
         df["consulting_multiplier"].values *
         df["stuffer_multiplier"].values *
         df["coding_gap_multiplier"].values *
-        hp_soft_mult
+        hp_soft_mult *
+        diversity_mult
     )
 
     # Skill group count — for reasoning (number of non-zero taxonomy groups)

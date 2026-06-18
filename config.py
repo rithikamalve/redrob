@@ -97,6 +97,15 @@ HONEYPOT_SOFT_MULT: float = 0.65   # 1 honeypot signal
 STUFFER_MULT: float       = 0.70   # keyword stuffer detected
 CODING_GAP_MULT: float    = 0.75   # management-only recent titles
 
+# Diversity safeguard: within any (current_company, current_title) cluster,
+# only the top DIVERSITY_GROUP_FREE_COUNT candidates (ranked by jd_fit_score)
+# keep full weight; additional members of the same cluster get a modest
+# penalty so the top 100 isn't dominated by near-identical profiles sharing
+# the same employer+title. Candidates with missing company/title are exempt
+# (no meaningful grouping possible). Not a hard exclusion — still rankable.
+DIVERSITY_GROUP_FREE_COUNT: int   = 2
+DIVERSITY_PENALTY_MULT: float     = 0.80
+
 # ---------------------------------------------------------------------------
 # Location classification scores
 # ---------------------------------------------------------------------------
@@ -421,7 +430,8 @@ RERANKER_MODEL: str    = "BAAI/bge-reranker-base"
 RERANK_TOP_K: int      = 500    # candidates to cross-encode (keep fast)
 RERANK_SCORE_WEIGHT: float = 0.65  # blend: 0.65×rerank + 0.35×bi-encoder
 
-# Full JD text used as the query for cross-encoder comparison.
+# Full JD text used as the query for cross-encoder comparison — hand-written
+# FALLBACK used when LLM-based parsing (scorer/jd_parser.py) is unavailable.
 # Distilled from the actual job_description.docx — every requirement,
 # disqualifier, and "explicitly do NOT want" item below is taken directly
 # from that document, not paraphrased or invented. Kept deliberately short
@@ -450,10 +460,94 @@ RERANK_JD_TEXT: str = (
     "open-source contributions."
 )
 
-# JD decomposed into 5 targeted query strings for the bi-encoder, mirroring
-# the actual structure of job_description.docx (must-haves, eval rigor,
-# shipped-production-code bar, ideal-candidate narrative, nice-to-haves) —
-# not a generic AI/ML buzzword list.
+# ---------------------------------------------------------------------------
+# LLM-based JD parsing (precompute.py only — never used in rank.py).
+# Runs once per precompute.py invocation, not per-candidate: parses the real
+# JD text below into structured requirements via Groq, then dynamically
+# builds JD_QUERIES_DEFAULT/RERANK_JD_TEXT_DEFAULT-equivalent strings from
+# that structure. If GROQ_API_KEY isn't set or the call fails, precompute.py
+# falls back to the hand-written JD_QUERIES/RERANK_JD_TEXT below — the
+# pipeline never hard-fails for lack of an API key.
+# ---------------------------------------------------------------------------
+GROQ_MODEL: str          = "llama-3.3-70b-versatile"
+GROQ_API_URL: str        = "https://api.groq.com/openai/v1/chat/completions"
+JD_PARSE_CACHE_PATH: str = "features/jd_parsed_cache.json"
+
+# Full verbatim JD text (condensed from job_description.docx, dropping only
+# pure narrative/cultural framing — every requirement, disqualifier, and
+# "do NOT want" item is real, not paraphrased) — this is what the LLM parses.
+FULL_JD_TEXT_RAW: str = (
+    "Job Description: Senior AI Engineer — Founding Team. Redrob AI (Series A "
+    "AI-native talent intelligence platform). Pune/Noida, India, hybrid. "
+    "5-9 years experience — a range, not a hard requirement.\n\n"
+    "What you'd be doing: own the intelligence layer of Redrob's product — the "
+    "ranking, retrieval, and matching systems that decide what recruiters see "
+    "when they search for candidates and what candidates see when they search "
+    "for roles. Current system is mostly BM25 + rule-based scoring, working but "
+    "not great. You'll ship a v2 ranking system using embeddings, hybrid "
+    "retrieval, and probably LLM-based re-ranking, then set up evaluation "
+    "infrastructure (offline benchmarks, online A/B testing, recruiter-feedback "
+    "loops).\n\n"
+    "Disqualifiers we actually apply: pure research/academic background with no "
+    "production deployment experience — we will not move forward. AI experience "
+    "consisting primarily of recent (under 12 months) LangChain-to-OpenAI "
+    "projects, without substantial pre-LLM-era ML production experience — we "
+    "will probably not move forward. Senior engineers who haven't written "
+    "production code in the last 18 months because they moved into architecture "
+    "or tech-lead-only roles — we will probably not move forward. This role "
+    "writes code.\n\n"
+    "Things you absolutely need: production experience with embeddings-based "
+    "retrieval systems (sentence-transformers, OpenAI embeddings, BGE, E5, or "
+    "similar) deployed to real users — handled embedding drift, index refresh, "
+    "retrieval-quality regression in production. Production experience with "
+    "vector databases or hybrid search infrastructure — Pinecone, Weaviate, "
+    "Qdrant, Milvus, OpenSearch, Elasticsearch, FAISS, or similar. Strong "
+    "Python, code quality matters. Hands-on experience designing evaluation "
+    "frameworks for ranking systems — NDCG, MRR, MAP, offline-to-online "
+    "correlation, A/B test interpretation.\n\n"
+    "Things we'd like but won't reject you for: LLM fine-tuning experience "
+    "(LoRA, QLoRA, PEFT). Experience with learning-to-rank models (XGBoost-"
+    "based or neural). Prior exposure to HR-tech, recruiting tech, or "
+    "marketplace products. Background in distributed systems or large-scale "
+    "inference optimization. Open-source contributions in the AI/ML space.\n\n"
+    "Things we explicitly do NOT want: title-chasers — career trajectory shows "
+    "optimizing for Senior to Staff to Principal titles by switching companies "
+    "every ~1.5 years; we need someone who plans to be here 3+ years. Framework "
+    "enthusiasts — GitHub full of LangChain tutorials and 'how I used [hot "
+    "framework]' blog posts, without systems thinking. People who have only "
+    "worked at consulting firms (TCS, Infosys, Wipro, Accenture, Cognizant, "
+    "Capgemini, etc.) their entire career — if currently at one but with prior "
+    "product-company experience, that's fine. People whose primary expertise is "
+    "computer vision, speech, or robotics without significant NLP/IR exposure. "
+    "People whose work has been entirely closed-source proprietary systems for "
+    "5+ years with no external validation (papers, talks, open-source).\n\n"
+    "How to read between the lines — the ideal candidate: 6-8 years total "
+    "experience, of which 4-5 are in applied ML/AI roles at product companies "
+    "(not pure services). Has shipped at least one end-to-end ranking, search, "
+    "or recommendation system to real users at meaningful scale. Has strong "
+    "opinions about retrieval (hybrid vs dense), evaluation (offline vs "
+    "online), and LLM integration (when to fine-tune vs prompt) and can defend "
+    "them with reference to systems they actually built. Located in or willing "
+    "to relocate to Noida or Pune (Hyderabad, Pune, Mumbai, Delhi NCR also "
+    "welcome; outside India case-by-case, no visa sponsorship). Active on the "
+    "Redrob platform or otherwise clearly in the job market.\n\n"
+    "Note for hackathon participants: the right answer is not 'find candidates "
+    "whose skills section contains the most AI keywords' — that's a trap built "
+    "into the dataset. The right answer involves reasoning about the gap "
+    "between what the JD says and what it means. A candidate may not use the "
+    "words 'RAG' or 'Pinecone' but if their career history shows they built a "
+    "recommendation system at a product company, they're a fit. A candidate "
+    "with every AI keyword listed as a skill but whose title is 'Marketing "
+    "Manager' is not a fit. Behavioral signals matter too — a perfect-on-paper "
+    "candidate who hasn't logged in for 6 months and has a 5% recruiter "
+    "response rate is, for hiring purposes, not actually available."
+)
+
+# JD decomposed into 5 targeted query strings for the bi-encoder — hand-written
+# FALLBACK used when LLM-based parsing (scorer/jd_parser.py) is unavailable
+# (no GROQ_API_KEY) or fails. Mirrors the actual structure of the real JD
+# (must-haves, eval rigor, shipped-production-code bar, ideal-candidate
+# narrative, nice-to-haves) — not a generic AI/ML buzzword list.
 JD_QUERIES: List[str] = [
     # Q1 — Must-have: production embeddings retrieval + vector DB/hybrid search
     (

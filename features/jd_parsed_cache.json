@@ -1,0 +1,33 @@
+{
+  "raw_extraction": {
+    "job_title": "Senior AI Engineer \u2014 Founding Team, Redrob AI",
+    "role_mandate": "Own intelligence layer of Redrob's product, ranking and retrieval systems",
+    "must_have_requirements": [
+      "production embeddings-based retrieval deployed to real users \u2014 sentence-transformers, BGE, or OpenAI embeddings",
+      "production experience with vector databases or hybrid search infrastructure \u2014 Pinecone, Weaviate, or similar",
+      "hands-on experience designing evaluation frameworks for ranking systems \u2014 NDCG, MRR, MAP, offline-to-online correlation",
+      "strong Python skills with focus on code quality and production deployment experience"
+    ],
+    "ideal_candidate_profile": "Applied ML/AI professional with 6-8 years experience, 4-5 in product companies",
+    "nice_to_have": [
+      "LLM fine-tuning experience with LoRA or QLoRA",
+      "experience with learning-to-rank models like XGBoost",
+      "prior exposure to HR-tech or recruiting tech products",
+      "background in distributed systems optimization"
+    ],
+    "hard_disqualifiers": [
+      "pure research background with no production deployment experience",
+      "recent AI experience limited to LangChain-to-OpenAI projects",
+      "senior engineers without recent production code experience",
+      "primary expertise in computer vision, speech, or robotics without NLP/IR exposure"
+    ]
+  },
+  "jd_queries": [
+    "production embeddings-based retrieval deployed to real users \u2014 sentence-transformers, BGE, or OpenAI embeddings",
+    "production experience with vector databases or hybrid search infrastructure \u2014 Pinecone, Weaviate, or similar",
+    "hands-on experience designing evaluation frameworks for ranking systems \u2014 NDCG, MRR, MAP, offline-to-online correlation",
+    "strong Python skills with focus on code quality and production deployment experience",
+    "Applied ML/AI professional with 6-8 years experience, 4-5 in product companies"
+  ],
+  "rerank_jd_text": "Senior AI Engineer \u2014 Founding Team, Redrob AI.\nOwn intelligence layer of Redrob's product, ranking and retrieval systems\nMust have: production embeddings-based retrieval deployed to real users \u2014 sentence-transformers, BGE, or OpenAI embeddings; production experience with vector databases or hybrid search infrastructure \u2014 Pinecone, Weaviate, or similar; hands-on experience designing evaluation frameworks for ranking systems \u2014 NDCG, MRR, MAP, offline-to-online correlation; strong Python skills with focus on code quality and production deployment experience.\nReject: pure research background with no production deployment experience; recent AI experience limited to LangChain-to-OpenAI projects; senior engineers without recent production code experience; primary expertise in computer vision, speech, or robotics without NLP/IR exposure.\nNice to have: LLM fine-tuning experience with LoRA or QLoRA; experience with learning-to-rank models like XGBoost; prior exposure to HR-tech or recruiting tech products."
+}

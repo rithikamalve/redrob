@@ -39,6 +39,7 @@ from ingest import normalise_candidate, stream_candidates
 from scorer.behavioral import extract_behavioral_features
 from scorer.career import experience_curve, extract_career_features
 from scorer.honeypot import compute_honeypot
+from scorer.jd_parser import get_jd_queries_and_rerank_text
 from scorer.logistics import compute_logistics_scores
 from config import RERANK_TOP_K
 from scorer.semantic import (
@@ -231,8 +232,16 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Phase B — bi-encoder semantic embedding
     # -----------------------------------------------------------------------
+    # JD requirements: LLM-parsed (Groq, one call, real JD text) if GROQ_API_KEY
+    # is set, else the hand-written fallback in config.py. Never blocks the run.
+    jd_queries, rerank_jd_text, used_llm_jd_parsing = get_jd_queries_and_rerank_text()
+    log.info(
+        "JD requirements source: %s",
+        "LLM-parsed (Groq)" if used_llm_jd_parsing else "hand-written fallback (config.py)",
+    )
+
     model  = load_model()
-    q_vecs = embed_queries(model)
+    q_vecs = embed_queries(model, queries=jd_queries)
     log.info("Query embedding shape: %s", q_vecs.shape)
 
     valid_indices = [i for i, t in enumerate(texts) if t is not None]
@@ -279,7 +288,7 @@ def main() -> None:
         rerank_texts          = [texts[i] for i in rerank_global_indices]  # type: ignore
 
         reranker     = load_reranker()
-        rerank_scores = rerank_candidates(rerank_texts, reranker)
+        rerank_scores = rerank_candidates(rerank_texts, reranker, jd_text=rerank_jd_text)
         log.info(
             "Rerank scores — min=%.4f  max=%.4f  mean=%.4f  (n=%d)",
             rerank_scores.min(), rerank_scores.max(), rerank_scores.mean(),

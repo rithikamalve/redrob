@@ -44,7 +44,8 @@ compute:
   pre_computation_required: true
   pre_computation_time_minutes: 50
   # Breakdown: ~2 min rule-based feature extraction (honeypot/gates/career/
-  # skills/behavioral/logistics scoring for 100K candidates) + ~44 min
+  # skills/behavioral/logistics scoring for 100K candidates) + ~1-2s one-time
+  # Groq LLM call for JD parsing (cached after first run) + ~44 min
   # bi-encoder embedding (all-MiniLM-L6-v2, 100K candidates) + ~3-5 min
   # cross-encoder reranking (BAAI/bge-reranker-base, top 500 candidates).
   # rank.py itself (the timed/graded step) has zero network or GPU-capable
@@ -57,40 +58,57 @@ ai_tools_used:
   - "Claude"
 
 ai_usage_summary: |
-  Used Claude (Claude Code) throughout development as a pair-programming
-  collaborator: architecture discussion, writing and iterating on the rule-based
-  scorers (honeypot detection, career/skills/behavioral/logistics features),
-  the two-stage semantic retrieval pipeline (bi-encoder + cross-encoder
-  reranking), the composite ranking logic, and deterministic reasoning
-  generation. All design decisions (scoring weights, what counts as a
-  disqualifier, the two-stage retrieval architecture, what to cut when the
-  cross-encoder token budget overflowed) were made and tested by me; Claude
-  did not autonomously decide the approach. No candidate data was sent to
-  any external LLM API during the actual ranking step — only used during
-  development to read/discuss code and the provided JD/spec documents.
+  Two distinct uses, worth separating clearly:
+
+  (1) Development tool: used Claude (Claude Code) throughout development as a
+  pair-programming collaborator — architecture discussion, writing and
+  iterating on the rule-based scorers (honeypot detection, career/skills/
+  behavioral/logistics features), the two-stage semantic retrieval pipeline
+  (bi-encoder + cross-encoder reranking), the composite ranking logic, and
+  deterministic reasoning generation. All design decisions (scoring weights,
+  what counts as a disqualifier, the two-stage retrieval architecture, what
+  to cut when the cross-encoder token budget overflowed, the diversity
+  safeguard) were made and tested by me; Claude did not autonomously decide
+  the approach.
+
+  (2) Pipeline component (not a dev tool — part of the submitted system):
+  precompute.py makes ONE call to Groq (llama-3.3-70b-versatile) to parse the
+  real job description into structured requirements (must-haves, hard
+  disqualifiers, nice-to-haves), which then drive the bi-encoder/cross-
+  encoder JD queries instead of a hand-written decomposition. This is
+  compliant with the compute constraints since it's one call on one ~600-word
+  document, not per-candidate, and runs only in precompute.py (network-
+  allowed, no time limit) — never in rank.py. Falls back to a hand-written
+  default if GROQ_API_KEY is unset or the call fails; the pipeline has no
+  hard dependency on it. No candidate data is ever sent to any LLM — only
+  the static JD text.
 
 # ============================================================================
 # Approach summary
 # ============================================================================
 methodology_summary: |
-  Two-phase pipeline. precompute.py (no time limit) runs once: rule-based
-  scorers extract career (ML-months, title-hop, coding-gap, founding-team
-  exposure), skills (6-group taxonomy with stuffer detection), behavioral
-  (recency/response/GitHub/notice/saved/interview/offer from the 23 redrob
-  signals), logistics (location/salary/work-mode), and honeypot (5-signal
-  internal-consistency check) features for all 100K candidates. A MiniLM
-  bi-encoder embeds all candidates against 5 JD-derived query vectors
-  (max+mean similarity blend); the top 500 by a proxy score are then
-  cross-encoded against the real JD text with BAAI/bge-reranker-base for
-  higher-precision reranking — classic two-stage retrieval. rank.py (the
+  Two-phase pipeline. precompute.py (no time limit) runs once: a single Groq
+  LLM call parses the real JD into structured requirements (must-haves,
+  disqualifiers, nice-to-haves), driving 5 bi-encoder query vectors instead
+  of a hand-written decomposition (falls back to hand-written defaults if no
+  API key). Rule-based scorers extract career (ML-months, title-hop, coding-
+  gap, founding-team exposure), skills (6-group taxonomy with stuffer
+  detection), behavioral (recency/response/GitHub/notice/saved/interview/
+  offer from the 23 redrob signals), logistics (location/salary/work-mode),
+  and honeypot (5-signal internal-consistency check) features for all 100K
+  candidates. A MiniLM bi-encoder embeds all candidates against the JD query
+  vectors (max+mean similarity blend); the top 500 by a proxy score are then
+  cross-encoded against the LLM-parsed JD text with BAAI/bge-reranker-base
+  for higher-precision reranking — classic two-stage retrieval. rank.py (the
   timed step, ~1-2 seconds, zero network/GPU imports) loads the precomputed
   features, applies hard gates (consulting-firm fraction, domain mismatch,
   honeypot), computes a weighted composite (JD fit 42%, career 32%,
   behavioral 21%, logistics 5%) with multiplicative penalties for honeypot-
-  soft/stuffer/coding-gap flags, runs a stability check across 3 alternate
-  weight configurations, generates deterministic fact-grounded reasoning
-  (named skill groups, company, JD-mapped concerns — no LLM call, so no
-  hallucination risk), and writes the submission CSV.
+  soft/stuffer/coding-gap flags and a diversity safeguard (caps over-
+  represented company+title clusters), runs a stability check across 3
+  alternate weight configurations, generates deterministic fact-grounded
+  reasoning (named skill groups, company, JD-mapped concerns — no LLM call
+  here, so no hallucination risk), and writes the submission CSV.
 
 # ============================================================================
 # Declarations
