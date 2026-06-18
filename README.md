@@ -25,14 +25,21 @@ methodology. This file covers setup and reproduction only.
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 
-# 2. Drop the dataset into the repo root (not committed — see .gitignore)
+# 2. (Optional) Set GROQ_API_KEY for LLM-based JD parsing in precompute.py.
+#    Not required — precompute.py falls back to a hand-written JD decomposition
+#    if unset. features/jd_parsed_cache.json (committed) already has a cached
+#    result, so this isn't needed at all unless you want to re-parse the JD.
+#    export GROQ_API_KEY=...        (bash)
+#    $env:GROQ_API_KEY = "..."      (PowerShell)
+
+# 3. Drop the dataset into the repo root (not committed — see .gitignore)
 #    candidates.jsonl, or candidates.jsonl.gz — both are accepted.
 
-# 3. Run the pipeline
+# 4. Run the pipeline
 python precompute.py --candidates ./candidates.jsonl --out ./features/features.parquet
 python rank.py --candidates ./candidates.jsonl --out ./submission.csv
 
-# 4. Validate before submitting
+# 5. Validate before submitting
 python validate_submission.py submission.csv
 ```
 
@@ -77,10 +84,12 @@ timed ranking step never touches `candidates.jsonl` itself.
 │   ├── behavioral.py              # recency, response, GitHub, notice, saved, interview/offer
 │   ├── skills.py                  # skill taxonomy, stuffer detection, assessment/education bonus
 │   ├── semantic.py                # bi-encoder embedding + cross-encoder reranking
+│   ├── jd_parser.py               # LLM-based JD parsing (Groq, precompute.py only)
 │   ├── reasoning.py               # deterministic, grounded reasoning string generation
 │   └── utils.py                   # date parsing, consulting-firm match, non-overlap merge
 ├── features/
-│   └── features.parquet         # precomputed output (committed — see above)
+│   ├── features.parquet         # precomputed output (committed — see above)
+│   └── jd_parsed_cache.json     # cached LLM JD parsing result (committed, avoids re-calling Groq)
 └── models/                      # downloaded model weights (gitignored — precompute.py fetches them)
 ```
 
