@@ -1,14 +1,3 @@
----
-title: Redrob Candidate Ranker
-emoji: 🎯
-colorFrom: blue
-colorTo: purple
-sdk: gradio
-sdk_version: "6.18.0"
-app_file: app.py
-pinned: false
----
-
 # Redrob Candidate Ranker
 
 An intelligent candidate ranking system built for Redrob's Intelligent
