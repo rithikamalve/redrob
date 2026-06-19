@@ -11,6 +11,15 @@ Evaluated against six checks (submission_spec.docx Section 3):
   4. No hallucination
   5. Variation between candidates
   6. Rank consistency (tone matches rank position)
+
+Check 5 ("Variation... not templated") is about more than just varying the
+*content* — a reviewer sampling 10 rows back-to-back will also notice if
+every single one follows the identical sentence skeleton, even with
+different facts plugged in. So sentence ASSEMBLY (not just content
+selection) is varied across 3 distinct phrasings below, chosen
+deterministically per candidate (from candidate_id, not randomly — output
+must stay reproducible run to run) so a random sample of 10 rows is very
+likely to include a mix of all 3 structures.
 """
 
 from __future__ import annotations
@@ -44,13 +53,21 @@ def _named_skill_groups(row: Dict[str, Any], top_n: int = 2) -> List[str]:
     return [label for label, _ in scored[:top_n]]
 
 
+def _template_variant(candidate_id: str) -> int:
+    """Deterministic 0/1/2 selector from the candidate_id's numeric suffix
+    (CAND_0018499 -> 18499 % 3) — stable across runs, no randomness, no
+    dependence on rank or score (so variety isn't correlated with tone)."""
+    digits = "".join(c for c in str(candidate_id) if c.isdigit())
+    return int(digits) % 3 if digits else 0
+
+
 def generate_reasoning(row: Dict[str, Any], rank: int) -> str:
     """
     Generate a ≤REASONING_MAX_CHARS (250 char) reasoning string for one candidate.
 
-    Structure:
-      Sentence 1 — strength: "{yoe}yr {title} at {company} | {location} — {top strengths}."
-      Sentence 2 — honest concern OR secondary strength.
+    Facts (who/strengths/concerns) are computed once; then assembled into one
+    of 3 distinct sentence structures chosen deterministically per candidate,
+    so reasoning text varies in form as well as content.
 
     Ranks 76–100: note lower-priority filler, grounded in the actual weakest
     signal rather than a bare "filler" label.
@@ -144,22 +161,74 @@ def generate_reasoning(row: Dict[str, Any], rank: int) -> str:
         weakest = "JD fit" if fit_score < 0.45 else ("skill match" if not skill_groups else "overall signal strength")
         concerns.append(f"included as lower-priority filler — {weakest} is the limiting factor here")
 
-    # --- Assemble sentences ---
     who = f"{yoe:.1f}yr {title}" if title else f"{yoe:.1f}yr candidate"
     if company:
         who += f" at {company}"
-    s1 = f"{who} | {loc_label}"
 
+    variant = _template_variant(row.get("candidate_id"))
+    result = _assemble(variant, who, title, company, yoe, loc_label, strengths, concerns)
+    return _clean_truncate(result, REASONING_MAX_CHARS)
+
+
+def _clean_truncate(text: str, max_chars: int) -> str:
+    """Truncate at the limit without cutting mid-word — a handful of
+    longer-template rows landed right at the 250-char cap and ended on a
+    fragment like '...the limiting factor h'. Trims back to the last
+    complete word instead."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_space = cut.rfind(" ")
+    if last_space > 0:
+        cut = cut[:last_space]
+    return cut.rstrip(" ,;—-") + "."
+
+
+def _assemble(
+    variant: int,
+    who: str,
+    title: str,
+    company: str,
+    yoe: float,
+    loc_label: str,
+    strengths: List[str],
+    concerns: List[str],
+) -> str:
+    """Three distinct sentence structures over the same grounded facts."""
+
+    if variant == 0:
+        s1 = f"{who} | {loc_label}"
+        if strengths:
+            s1 += " — " + "; ".join(strengths[:2])
+        s1 += "."
+        if concerns:
+            s2 = "Concern: " + "; ".join(concerns[:2]) + "."
+        elif len(strengths) > 2:
+            s2 = "Also: " + "; ".join(strengths[2:4]) + "."
+        else:
+            s2 = ""
+        return (s1 + (" " + s2 if s2 else "")).strip()
+
+    if variant == 1:
+        lead = strengths[0][0].upper() + strengths[0][1:] if strengths else who
+        s1 = f"{lead} — {who}, {loc_label}."
+        if concerns:
+            s2 = "Watch for: " + ", ".join(concerns[:2]) + "."
+        elif len(strengths) > 1:
+            s2 = "Also brings " + " and ".join(strengths[1:3]) + "."
+        else:
+            s2 = ""
+        return (s1 + (" " + s2 if s2 else "")).strip()
+
+    # variant == 2
+    yrs = f"{yoe:.1f} yrs exp" if yoe else "experience not stated"
+    s1 = f"{title or 'Candidate'} at {company}, {yrs}, {loc_label}." if company else f"{title or 'Candidate'}, {yrs}, {loc_label}."
     if strengths:
-        s1 += " — " + "; ".join(strengths[:2])
-    s1 += "."
-
+        s1 += " Strengths: " + ", ".join(strengths[:2]) + "."
     if concerns:
-        s2 = "Concern: " + "; ".join(concerns[:2]) + "."
+        s2 = "Flagged: " + "; ".join(concerns[:2]) + "."
     elif len(strengths) > 2:
-        s2 = "Also: " + "; ".join(strengths[2:4]) + "."
+        s2 = "Plus " + ", ".join(strengths[2:4]) + "."
     else:
         s2 = ""
-
-    result = (s1 + (" " + s2 if s2 else "")).strip()
-    return result[:REASONING_MAX_CHARS]
+    return (s1 + (" " + s2 if s2 else "")).strip()

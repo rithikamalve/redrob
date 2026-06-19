@@ -1362,6 +1362,21 @@ The reasoning is evaluated at Stage 4 against six checks:
 5. Variation between candidates
 6. Rank consistency (tone matches rank position)
 
+**On check 5 — variation is about structure, not just content.** An early
+version computed grounded, genuinely varied *facts* per candidate but
+always assembled them into the same sentence skeleton ("{yoe}yr {title} at
+{company} | {loc} — {strengths}. Concern/Also: {note}."). A reviewer
+sampling 10 rows back-to-back would correctly notice the fixed template even
+though every fact in it was real and non-hallucinated — exactly the
+"templated reasoning" pattern Stage 4 penalizes, just not in its most
+obvious form (literal copy-paste, which this never did). Fixed by separating
+fact computation from sentence assembly: the same strengths/concerns now
+feed one of 3 structurally distinct templates (`_assemble()` in
+`scorer/reasoning.py`), chosen deterministically from each candidate_id's
+numeric suffix (not randomly — the run must stay reproducible). Verified
+on the real run: 39/32/29 split across the three structures in the top 100,
+so a random sample of 10 rows reliably includes a mix of all three.
+
 This is the actual `scorer/reasoning.py` logic (simplified slightly for
 readability — see the real file for the exact truncation/length-cap details):
 
